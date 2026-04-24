@@ -1,10 +1,7 @@
 from django.contrib.auth import get_user_model
-from django.utils import timezone
 from rest_framework import serializers
 
 from bank_app.models import Account
-
-from .models import OTPCode
 
 User = get_user_model()
 
@@ -36,22 +33,12 @@ class OTPVerifySerializer(serializers.Serializer):
     passport_id = serializers.CharField(max_length=20)
 
     def validate(self, attrs):
-        otp_obj = OTPCode.objects.filter(
-            phone_num=attrs["phone_num"],
-            code=attrs["otp"],
-            is_used=False,
-        ).first()
-        if not otp_obj:
-            raise serializers.ValidationError({"otp": "Invalid OTP code."})
-        if otp_obj.expires_at <= timezone.now():
-            raise serializers.ValidationError({"otp": "OTP code is invalid."})
         attrs["first_name"] = attrs.get("first_name") or attrs.get("fname")
         attrs["last_name"] = attrs.get("last_name") or attrs.get("lname")
         if not attrs["first_name"] or not attrs["last_name"]:
             raise serializers.ValidationError(
                 {"first_name": "first_name/last_name (or fname/lname) are required."}
             )
-        attrs["otp_obj"] = otp_obj
         return attrs
 
 

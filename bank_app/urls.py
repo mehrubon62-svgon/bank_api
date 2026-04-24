@@ -15,4 +15,5 @@ urlpatterns = [
     path("black_list/account/", AccountBlackListView.as_view(), name="black_list_account"),
     path("black_list/card/", CardBlackListView.as_view(), name="black_list_card"),
     path("admin/", AdminDashboardView.as_view(), name="admin_dashboard"),
+    path("ai/", FinanceAssistantView.as_view(), name="finance_ai_assistant"),
 ]

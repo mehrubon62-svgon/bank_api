@@ -1,14 +1,99 @@
+import json
+from urllib import error, request as urllib_request
+
+from django.conf import settings
 from django.db import transaction as db_transaction
 from django.db.models import Q
+from drf_yasg.utils import swagger_auto_schema
 from rest_framework import permissions, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 from accounts.models import CustomUser
-
 from .models import *
 from .serializers import *
+
+
+FINANCE_ASSISTANT_SYSTEM_PROMPT = """
+You are a highly practical finance and banking assistant for a bank API product.
+
+Primary mission:
+1) Give useful, concrete, and actionable answers for finance/banking questions.
+2) Do not produce lazy fallback replies like "please clarify" unless absolutely required.
+3) If the question is broad, make reasonable assumptions and still provide value.
+
+Domain scope (allowed):
+- Personal finance: budgeting, debt payoff, savings strategy, emergency funds.
+- Banking: cards, accounts, transfers, payment flows, fees, exchange basics.
+- Lending: credit score basics, loans, APR/effective rate, repayment strategy.
+- Deposits and interest: simple/compound interest, term deposits, scenarios.
+- Business basics: cash flow, treasury basics, payment operations.
+- Risk and fraud prevention in banking operations.
+
+Out of scope:
+- Programming unrelated to finance.
+- Medicine, law outside finance context, general trivia, entertainment, politics.
+If out of scope, politely refuse in 1-2 short sentences and offer 2-3 examples of valid finance questions.
+
+Answer quality requirements:
+- Always answer in the user's language. If mixed, default to Russian.
+- Be specific and practical. Avoid vague generic text.
+- Use short structure when useful:
+  - "Короткий ответ"
+  - "Почему"
+  - "Что делать (шаги)"
+  - "Пример расчета" (if numbers are relevant)
+- If user gives numbers, calculate and show formulas clearly.
+- If user gives no numbers but asks optimization question, provide a default scenario with sample numbers.
+- Mention uncertainty briefly when assumptions are used.
+
+Safety and compliance style:
+- Do not claim guaranteed profits.
+- Do not promote fraud, illegal bypasses, or money laundering.
+- For high-risk decisions, add a short caution note.
+
+Behavior constraints:
+- Never return an empty answer.
+- Never reply only with "уточните вопрос" if you can provide even partial help.
+- Prefer direct recommendations and checklists.
+- Keep tone professional, clear, and concise, but informative.
+""".strip()
+
+
+def _openrouter_chat(question, model_name):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    payload = {
+        "model": model_name,
+        "max_tokens": settings.OPENROUTER_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "system",
+                "content": FINANCE_ASSISTANT_SYSTEM_PROMPT,
+            },
+            {"role": "user", "content": question},
+        ],
+    }
+
+    req = urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost",
+            "X-Title": "bank-api-assistant",
+        },
+        method="POST",
+    )
+
+    with urllib_request.urlopen(req, timeout=35) as response:
+        raw_data = response.read().decode("utf-8")
+
+    data = json.loads(raw_data)
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValidationError({"detail": "OpenRouter returned empty response."})
+    return choices[0].get("message", {}).get("content", "")
 
 
 class AddCardView(APIView):
@@ -321,3 +406,33 @@ class AdminDashboardView(APIView):
                 "card_blacklist": CardBlackListSerializer(CardBlackList.objects.all(), many=True).data,
             }
         )
+
+
+class FinanceAssistantView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(request_body=AIAssistantRequestSerializer)
+    def post(self, request):
+        serializer = AIAssistantRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        question = serializer.validated_data["text"].strip()
+        model_name = settings.OPENROUTER_MODEL
+
+        if not settings.OPENROUTER_API_KEY:
+            return Response({"detail": "OPENROUTER_API_KEY is not set."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        try:
+            answer = _openrouter_chat(question, model_name)
+        except error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="ignore")
+            return Response(
+                {"detail": "OpenRouter request failed.", "status_code": exc.code, "error": error_body},
+                status=exc.code,
+            )
+        except error.URLError as exc:
+            return Response(
+                {"detail": "Unable to reach OpenRouter.", "error": str(exc.reason)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"answer": answer})

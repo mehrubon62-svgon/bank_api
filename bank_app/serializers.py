@@ -118,3 +118,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ("id", "username", "phone_num", "is_phone_verified", "is_staff", "is_superuser")
+
+
+class AIAssistantRequestSerializer(serializers.Serializer):
+    text = serializers.CharField(max_length=1500)

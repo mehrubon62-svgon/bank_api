@@ -1,8 +1,7 @@
 import random
-from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.utils import timezone
+from django.core.cache import cache
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -10,7 +9,6 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from bank_app.models import Account
 
-from .models import OTPCode
 from .serializers import (
     OTPAuthSerializer,
     OTPVerifySerializer,
@@ -18,6 +16,11 @@ from .serializers import (
 )
 
 User = get_user_model()
+OTP_TTL_SECONDS = 300
+
+
+def _otp_cache_key(phone_num):
+    return f"otp:{phone_num}"
 
 
 class RegisterView(generics.CreateAPIView):
@@ -53,11 +56,7 @@ class OTPAuthView(APIView):
 
         phone_num = serializer.validated_data["phone_num"]
         otp_code = f"{random.randint(100000, 999999)}"
-        OTPCode.objects.create(
-            phone_num=phone_num,
-            code=otp_code,
-            expires_at=timezone.now() + timedelta(minutes=5),
-        )
+        cache.set(_otp_cache_key(phone_num), otp_code, timeout=OTP_TTL_SECONDS)
 
         # In production this code should be sent via SMS provider.
         return Response(
@@ -65,7 +64,7 @@ class OTPAuthView(APIView):
                 "message": "OTP sent successfully.",
                 "phone_num": phone_num,
                 "otp": otp_code,
-                "expires_in_seconds": 300,
+                "expires_in_seconds": OTP_TTL_SECONDS,
             },
             status=status.HTTP_200_OK,
         )
@@ -79,10 +78,12 @@ class OTPVerifyView(APIView):
         serializer.is_valid(raise_exception=True)
 
         phone_num = serializer.validated_data["phone_num"]
-        otp_obj = serializer.validated_data["otp_obj"]
-
-        if otp_obj.expires_at < timezone.now():
+        otp_code = serializer.validated_data["otp"]
+        cached_otp = cache.get(_otp_cache_key(phone_num))
+        if not cached_otp:
             return Response({"otp": "OTP code has expired."}, status=status.HTTP_400_BAD_REQUEST)
+        if cached_otp != otp_code:
+            return Response({"otp": "Invalid OTP code."}, status=status.HTTP_400_BAD_REQUEST)
 
         user, _ = User.objects.get_or_create(
             phone_num=phone_num,
@@ -108,8 +109,7 @@ class OTPVerifyView(APIView):
             account.passport_id = serializer.validated_data["passport_id"]
             account.save(update_fields=["first_name", "last_name", "passport_id"])
 
-        otp_obj.is_used = True
-        otp_obj.save(update_fields=["is_used"])
+        cache.delete(_otp_cache_key(phone_num))
 
         refresh = RefreshToken.for_user(user)
         return Response(
