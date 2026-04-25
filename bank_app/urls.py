@@ -16,4 +16,9 @@ urlpatterns = [
     path("black_list/card/", CardBlackListView.as_view(), name="black_list_card"),
     path("admin/", AdminDashboardView.as_view(), name="admin_dashboard"),
     path("ai/", FinanceAssistantView.as_view(), name="finance_ai_assistant"),
+    path("convert/", CurrencyConvertView.as_view(), name="currency_convert"),
+    path("cashback/mastercard/", MastercardCashbackView.as_view(), name="mastercard_cashback"),
+    path("family/", FamilyGroupView.as_view(), name="family_group"),
+    path("family/add_member/", FamilyMemberAddView.as_view(), name="family_add_member"),
+    path("statement/6-months/", StatementSixMonthsView.as_view(), name="statement_six_months"),
 ]

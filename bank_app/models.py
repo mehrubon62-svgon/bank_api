@@ -137,3 +137,27 @@ class CardBlackList(models.Model):
 
     def __str__(self):
         return f"BlackList card {self.card_id}"
+
+
+class FamilyGroup(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
+    owner = models.ForeignKey("accounts.CustomUser", on_delete=models.CASCADE, related_name="owned_family_groups")
+    name = models.CharField(max_length=80, default="My Family")
+    cashback_bonus_percent = models.DecimalField(max_digits=4, decimal_places=2, default=0.50)
+    transfer_fee_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=25.00)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"FamilyGroup {self.name} ({self.owner_id})"
+
+
+class FamilyMember(models.Model):
+    group = models.ForeignKey(FamilyGroup, on_delete=models.CASCADE, related_name="members")
+    user = models.ForeignKey("accounts.CustomUser", on_delete=models.CASCADE, related_name="family_memberships")
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("group", "user")
+
+    def __str__(self):
+        return f"FamilyMember group={self.group_id} user={self.user_id}"

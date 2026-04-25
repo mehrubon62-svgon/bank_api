@@ -42,6 +42,7 @@ REDIS_URL = os.getenv('REDIS_URL', '').strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini")
 OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "800"))
+EXCHANGE_RATE_API_URL = os.getenv("EXCHANGE_RATE_API_URL", "https://open.er-api.com/v6/latest")
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (

@@ -122,3 +122,31 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
 class AIAssistantRequestSerializer(serializers.Serializer):
     text = serializers.CharField(max_length=1500)
+
+
+class CurrencyConvertSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal("0.01"))
+    from_currency = serializers.CharField(max_length=3)
+    to_currency = serializers.CharField(max_length=3)
+
+    def validate(self, attrs):
+        attrs["from_currency"] = attrs["from_currency"].upper()
+        attrs["to_currency"] = attrs["to_currency"].upper()
+        return attrs
+
+
+class MastercardCashbackSerializer(serializers.Serializer):
+    card_id = serializers.CharField(max_length=16, required=False)
+    days = serializers.IntegerField(min_value=1, max_value=365, required=False, default=30)
+
+
+class FamilyGroupCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=80, required=False, allow_blank=True)
+
+
+class FamilyMemberAddSerializer(serializers.Serializer):
+    phone_num = serializers.CharField(max_length=20)
+
+
+class StatementSixMonthsSerializer(serializers.Serializer):
+    include_inside = serializers.BooleanField(required=False, default=True)

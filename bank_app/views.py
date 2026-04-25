@@ -1,9 +1,12 @@
 import json
+from datetime import timedelta
+from decimal import Decimal
 from urllib import error, request as urllib_request
 
 from django.conf import settings
 from django.db import transaction as db_transaction
 from django.db.models import Q
+from django.utils import timezone
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import permissions, status
 from rest_framework.exceptions import ValidationError
@@ -436,3 +439,294 @@ class FinanceAssistantView(APIView):
             )
 
         return Response({"answer": answer})
+
+
+class CurrencyConvertView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(request_body=CurrencyConvertSerializer)
+    def post(self, request):
+        serializer = CurrencyConvertSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        amount = serializer.validated_data["amount"]
+        from_currency = serializer.validated_data["from_currency"]
+        to_currency = serializer.validated_data["to_currency"]
+
+        if from_currency == to_currency:
+            return Response(
+                {
+                    "amount": str(amount),
+                    "from_currency": from_currency,
+                    "to_currency": to_currency,
+                    "rate": "1",
+                    "converted_amount": str(amount),
+                    "source": "same-currency",
+                }
+            )
+
+        url = f"{settings.EXCHANGE_RATE_API_URL}/{from_currency}"
+        req = urllib_request.Request(url, method="GET")
+        try:
+            with urllib_request.urlopen(req, timeout=20) as response:
+                raw_data = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            return Response(
+                {"detail": "Exchange rate API failed.", "status_code": exc.code},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except error.URLError as exc:
+            return Response(
+                {"detail": "Cannot reach exchange rate API.", "error": str(exc.reason)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        data = json.loads(raw_data)
+        rates = data.get("rates") or {}
+        rate_value = rates.get(to_currency)
+        if rate_value is None:
+            raise ValidationError({"to_currency": f"Currency '{to_currency}' is not available."})
+
+        rate = Decimal(str(rate_value))
+        converted = (amount * rate).quantize(Decimal("0.01"))
+        return Response(
+            {
+                "amount": str(amount),
+                "from_currency": from_currency,
+                "to_currency": to_currency,
+                "rate": str(rate),
+                "converted_amount": str(converted),
+                "source": settings.EXCHANGE_RATE_API_URL,
+            }
+        )
+
+
+class MastercardCashbackView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(request_body=MastercardCashbackSerializer)
+    def post(self, request):
+        serializer = MastercardCashbackSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        days = serializer.validated_data["days"]
+        date_from = timezone.now() - timedelta(days=days)
+        card_id = serializer.validated_data.get("card_id")
+
+        master_cards = Card.objects.filter(account__user=request.user, cart_name="master")
+        if card_id:
+            master_cards = master_cards.filter(card_number=card_id)
+        if not master_cards.exists():
+            raise ValidationError({"card_id": "Mastercard not found for current user."})
+
+        account_ids = list(master_cards.values_list("account_id", flat=True))
+        tx_qs = Transaction.objects.filter(sender_id__in=account_ids, created_at__gte=date_from)
+        inside_qs = TransactionInside.objects.filter(sender=request.user.phone_num, created_at__gte=date_from)
+
+        total_spent = Decimal("0.00")
+        for tx in tx_qs:
+            total_spent += tx.amount
+        for tx in inside_qs:
+            total_spent += tx.amount
+
+        base_rate = Decimal("0.01")
+        cashback_amount = (total_spent * base_rate).quantize(Decimal("0.01"))
+
+        family_group = FamilyGroup.objects.filter(owner=request.user).first()
+        family_bonus_percent = family_group.cashback_bonus_percent if family_group else Decimal("0.00")
+        family_bonus_amount = (total_spent * (family_bonus_percent / Decimal("100"))).quantize(Decimal("0.01"))
+
+        return Response(
+            {
+                "period_days": days,
+                "mastercard_count": master_cards.count(),
+                "total_spent": str(total_spent),
+                "base_cashback_rate_percent": "1.00",
+                "base_cashback_amount": str(cashback_amount),
+                "family_bonus_rate_percent": str(family_bonus_percent),
+                "family_bonus_amount": str(family_bonus_amount),
+                "total_cashback_amount": str((cashback_amount + family_bonus_amount).quantize(Decimal("0.01"))),
+            }
+        )
+
+
+class FamilyGroupView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(request_body=FamilyGroupCreateSerializer)
+    def post(self, request):
+        serializer = FamilyGroupCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        group, _ = FamilyGroup.objects.get_or_create(
+            owner=request.user,
+            defaults={"name": serializer.validated_data.get("name") or "My Family"},
+        )
+        if serializer.validated_data.get("name"):
+            group.name = serializer.validated_data["name"]
+            group.save(update_fields=["name"])
+
+        return Response(
+            {
+                "public_id": str(group.public_id),
+                "name": group.name,
+                "cashback_bonus_percent": str(group.cashback_bonus_percent),
+                "transfer_fee_discount_percent": str(group.transfer_fee_discount_percent),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    def get(self, request):
+        group = FamilyGroup.objects.filter(owner=request.user).first()
+        if not group:
+            raise ValidationError({"detail": "Family group is not created yet."})
+
+        members = [
+            {
+                "id": obj.user.id,
+                "phone_num": obj.user.phone_num,
+                "username": obj.user.username,
+                "added_at": obj.added_at,
+            }
+            for obj in group.members.select_related("user").all().order_by("-added_at")
+        ]
+        return Response(
+            {
+                "public_id": str(group.public_id),
+                "name": group.name,
+                "owner_phone": request.user.phone_num,
+                "cashback_bonus_percent": str(group.cashback_bonus_percent),
+                "transfer_fee_discount_percent": str(group.transfer_fee_discount_percent),
+                "members_count": len(members),
+                "members": members,
+            }
+        )
+
+
+class FamilyMemberAddView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @swagger_auto_schema(request_body=FamilyMemberAddSerializer)
+    def post(self, request):
+        serializer = FamilyMemberAddSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        group = FamilyGroup.objects.filter(owner=request.user).first()
+        if not group:
+            raise ValidationError({"detail": "Create family group first."})
+
+        member_user = CustomUser.objects.filter(phone_num=serializer.validated_data["phone_num"]).first()
+        if not member_user:
+            raise ValidationError({"phone_num": "User with this phone number was not found."})
+        if member_user.id == request.user.id:
+            raise ValidationError({"phone_num": "Owner is already part of the family group."})
+
+        member, created = FamilyMember.objects.get_or_create(group=group, user=member_user)
+        http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(
+            {
+                "group_public_id": str(group.public_id),
+                "member": {
+                    "id": member.user.id,
+                    "phone_num": member.user.phone_num,
+                    "username": member.user.username,
+                },
+                "created": created,
+                "perks": {
+                    "cashback_bonus_percent": str(group.cashback_bonus_percent),
+                    "transfer_fee_discount_percent": str(group.transfer_fee_discount_percent),
+                },
+            },
+            status=http_status,
+        )
+
+
+class StatementSixMonthsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        serializer = StatementSixMonthsSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+
+        include_inside = serializer.validated_data["include_inside"]
+        now = timezone.now()
+        date_from = now - timedelta(days=183)
+
+        tx_qs = Transaction.objects.filter(
+            Q(sender__user=request.user) | Q(reciver__user=request.user),
+            created_at__gte=date_from,
+        ).order_by("-created_at")
+        inside_qs = TransactionInside.objects.filter(
+            Q(sender=request.user.phone_num) | Q(reciver=request.user.phone_num),
+            created_at__gte=date_from,
+        ).order_by("-created_at")
+
+        monthly = {}
+        total_income = Decimal("0.00")
+        total_expense = Decimal("0.00")
+
+        def ensure_bucket(dt):
+            key = dt.strftime("%Y-%m")
+            if key not in monthly:
+                monthly[key] = {"month": key, "income": Decimal("0.00"), "expense": Decimal("0.00")}
+            return monthly[key]
+
+        for tx in tx_qs:
+            bucket = ensure_bucket(tx.created_at)
+            if tx.sender and tx.sender.user_id == request.user.id:
+                bucket["expense"] += tx.amount
+                total_expense += tx.amount
+            if tx.reciver and tx.reciver.user_id == request.user.id:
+                bucket["income"] += tx.amount
+                total_income += tx.amount
+
+        inside_items = []
+        if include_inside:
+            for tx in inside_qs:
+                bucket = ensure_bucket(tx.created_at)
+                if tx.sender == request.user.phone_num:
+                    bucket["expense"] += tx.amount
+                    total_expense += tx.amount
+                if tx.reciver == request.user.phone_num:
+                    bucket["income"] += tx.amount
+                    total_income += tx.amount
+                inside_items.append(
+                    {
+                        "public_id": str(tx.public_id),
+                        "type": tx.type,
+                        "sender": tx.sender,
+                        "receiver": tx.reciver,
+                        "amount": str(tx.amount),
+                        "status": tx.status,
+                        "created_at": tx.created_at,
+                    }
+                )
+
+        monthly_list = []
+        for key in sorted(monthly.keys()):
+            row = monthly[key]
+            monthly_list.append(
+                {
+                    "month": row["month"],
+                    "income": str(row["income"].quantize(Decimal("0.01"))),
+                    "expense": str(row["expense"].quantize(Decimal("0.01"))),
+                    "net": str((row["income"] - row["expense"]).quantize(Decimal("0.01"))),
+                }
+            )
+
+        return Response(
+            {
+                "period": {
+                    "from": date_from,
+                    "to": now,
+                },
+                "totals": {
+                    "income": str(total_income.quantize(Decimal("0.01"))),
+                    "expense": str(total_expense.quantize(Decimal("0.01"))),
+                    "net": str((total_income - total_expense).quantize(Decimal("0.01"))),
+                },
+                "monthly": monthly_list,
+                "transaction_history": TransactionSerializer(tx_qs, many=True).data,
+                "inside_history": inside_items,
+            }
+        )
